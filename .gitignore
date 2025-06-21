@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+.venv/
+venv/
+
+# VS Code
+.vscode/
+
+# Houdini temp / hipAutosaves
+hipAutosave/
+*.hip~
