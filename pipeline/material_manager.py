@@ -127,8 +127,13 @@ def create_MTLX_Subnet(matnet: hou.Node, prefix: str, assets_dir: str) -> None:
         print("  Setting up diffuse texture...")
         img = subnet.createNode("mtlximage", f"diff_{name}")
         
+        # Set signature to color3 for diffuse texture
+        if img.parm("signature"):
+            img.parm("signature").set("color3")
+        
         if set_file_parameter(img, diff):
-            img.setInput(0, tc)  # Connect texcoord to image
+            # As requested, the texcoord input is NOT connected for the diffuse image.
+            # The node will use its 'default' color value.
             nodes_created.append(img)
             
             # Try to connect to base_color
@@ -144,48 +149,54 @@ def create_MTLX_Subnet(matnet: hou.Node, prefix: str, assets_dir: str) -> None:
         print("  Setting up metallic/roughness texture...")
         img_mr = subnet.createNode("mtlximage", f"mr_{name}")
         
+        # Set signature to color3 for MR texture
+        if img_mr.parm("signature"):
+            img_mr.parm("signature").set("color3")
+        
         if set_file_parameter(img_mr, mr):
-            img_mr.setInput(0, tc)  # Connect texcoord to image
+            # As requested, the texcoord input is NOT connected for the MR image.
+            # The node will use its 'default' color value.
             nodes_created.append(img_mr)
             
-            # Try to split channels
-            # First try: mtlxseparate (MaterialX way)
+            # Use mtlxseparate3c to split R and G channels
             try:
-                sep = subnet.createNode("mtlxseparate", f"sep_{name}")
-                sep.setInput(0, img_mr)
-                nodes_created.append(sep)
-                
-                # Set to extract R channel for metallic
-                if sep.parm("index"):
-                    sep.parm("index").set(0)  # R = 0
-                
-                if connect_vop_nodes(std, "metallic", sep):
+                sep_mr = subnet.createNode("mtlxseparate3c", f"sep_mr_{name}")
+                sep_mr.setInput(0, img_mr)
+                nodes_created.append(sep_mr)
+
+                # Connect R channel (output 0) to metallic
+                if connect_vop_nodes(std, "metallic", sep_mr, src_output_idx=0):
                     print("    Connected metallic (R channel)")
-                elif connect_vop_nodes(std, "metalness", sep):
+                elif connect_vop_nodes(std, "metalness", sep_mr, src_output_idx=0):
                     print("    Connected metalness (R channel)")
-                
-                # Create another separator for G channel
-                sep_g = subnet.createNode("mtlxseparate", f"sep_g_{name}")
-                sep_g.setInput(0, img_mr)
-                if sep_g.parm("index"):
-                    sep_g.parm("index").set(1)  # G = 1
-                nodes_created.append(sep_g)
-                
-                if connect_vop_nodes(std, "roughness", sep_g):
+                else:
+                    print("    WARNING: Could not connect metallic")
+
+                # Connect G channel (output 1) to roughness
+                if connect_vop_nodes(std, "roughness", sep_mr, src_output_idx=1):
                     print("    Connected roughness (G channel)")
-                elif connect_vop_nodes(std, "specular_roughness", sep_g):
+                elif connect_vop_nodes(std, "specular_roughness", sep_mr, src_output_idx=1):
                     print("    Connected specular_roughness (G channel)")
-                    
+                else:
+                    print("    WARNING: Could not connect roughness")
+            
             except Exception as e:
-                print(f"    Could not create channel separators: {e}")
+                print(f"    Could not create mtlxseparate3c node: {e}")
+
 
     # Normal map
     if os.path.exists(nrm):
         print("  Setting up normal map...")
         img_n = subnet.createNode("mtlximage", f"nrm_{name}")
         
+        # Set signature to vector3 for normal map data
+        if img_n.parm("signature"):
+            img_n.parm("signature").set("vector3")
+            
         if set_file_parameter(img_n, nrm):
-            img_n.setInput(0, tc)  # Connect texcoord to image
+            # Connect texcoord (UVs) to the 'texcoord' input for the normal map.
+            # This connection is required for normal mapping to work correctly.
+            img_n.setInput(0, tc)
             nodes_created.append(img_n)
             
             # Normal map converter
