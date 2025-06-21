@@ -1,0 +1,22 @@
+[project]
+name = "styrofoamwrap"
+version = "0.1.0"
+description = "Procedural pipeline for importing USDs and submitting sims/renders"
+authors = [
+  { name="Your Name", email="you@example.com" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+
+dependencies = [
+  # Houdini’s “hou” module is provided by hython, so don’t list it here.
+  "pydantic",      # if you use Pydantic for config
+  "pyyaml"         # if you parse YAML configs
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+submit_usds = "pipeline.cli:main"
