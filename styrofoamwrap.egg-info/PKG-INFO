@@ -1,0 +1,30 @@
+Metadata-Version: 2.4
+Name: styrofoamwrap
+Version: 0.1.0
+Summary: Procedural pipeline for importing USDs and submitting sims/renders
+Author-email: Your Name <you@example.com>
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic
+Requires-Dist: pyyaml
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+
+1)Setup hou env
+python env_setup.py `
+  --houdini-path "C:\Program Files\Side Effects Software\Houdini19.5.805" `
+  --project-path E:\Project_Work\Amazon\StryofoamWrap
+
+
+# From your project root (where get-pip.py lives):
+$hython = "C:\Program Files\Side Effects Software\Houdini19.5.805\bin\hython.exe"
+& $hython ".\get-pip.py"
+
+#You will have to login to sideFX
+
+#check version 
+& $hython -m pip --version
+
+#run tests
+& $hython -m pip install -e E:\Project_Work\Amazon\StryofoamWrap
+& $hython -m pip install pytest

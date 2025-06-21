@@ -1,0 +1,2 @@
+[console_scripts]
+submit_usds = pipeline.cli:main
