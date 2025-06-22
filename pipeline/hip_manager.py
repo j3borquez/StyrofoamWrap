@@ -1,10 +1,241 @@
 # pipeline/hip_manager.py
 
 import os
+import re
+import json
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
 import hou
+from pxr import Usd, Sdf, UsdGeom
+
+
+def extract_base_identifier_from_filename(filename: str) -> str:
+    """
+    Extract the base identifier from a USD filename.
+    Examples:
+    - 'nan_A3DCZYC5E6B3MT80.usd' -> 'A3DCZYC5E6B3MT80'
+    - 'B000BRBYJ8_A3DCQGU4ZVZ7XB5H_base.usd' -> 'B000BRBYJ8'
+    - 'Mesh_B0009VXBAQ.usd' -> 'B0009VXBAQ'
+    """
+    # Remove file extension
+    base_name = os.path.splitext(filename)[0]
+    
+    # Split by underscore
+    parts = base_name.split('_')
+    
+    # Special handling for 'nan_' prefix
+    if len(parts) >= 2 and parts[0] == 'nan':
+        return parts[1]
+    
+    # Handle cases like "Mesh_B0009VXBAQ"
+    if len(parts) >= 2 and parts[0] == 'Mesh':
+        return parts[1]
+    
+    # Look for product identifier patterns (alphanumeric, often starts with B or A)
+    for part in parts:
+        if len(part) >= 6 and len(part) <= 15 and part.isalnum():
+            if part.startswith('B') or part.startswith('A'):
+                if part != 'base':  # Skip the 'base' suffix
+                    return part
+    
+    # If no pattern found, use the first part
+    return parts[0] if parts else base_name
+
+
+def _copy_prim_recursive(source_prim: Usd.Prim, target_parent_prim: Usd.Prim, base_id: str = None):
+    """
+    Recursively copies a source USD prim and its entire subtree to a new location
+    under a target parent prim. All attributes, metadata, and relationships are copied.
+    This function is designed to copy between potentially different stages,
+    with explicit handling for normals and UVs on UsdGeom.Mesh prims.
+    
+    If base_id is provided, it will rename certain child primitives to use the base_id.
+    """
+    # Determine the new name for this prim
+    original_name = source_prim.GetName()
+    new_name = original_name
+    
+    # If we have a base_id, rename certain primitive patterns
+    if base_id:
+        # Handle Mesh_ prefixed primitives
+        if original_name.startswith("Mesh_"):
+            new_name = f"Mesh_{base_id}"
+            print(f"        Renaming child prim: '{original_name}' -> '{new_name}'")
+        # Handle other patterns that might need renaming
+        elif len(original_name) >= 6 and (original_name.startswith("B") or original_name.startswith("A")):
+            # This looks like a product ID that should be replaced with our base_id
+            new_name = base_id
+            print(f"        Renaming child prim: '{original_name}' -> '{new_name}'")
+    
+    new_path = target_parent_prim.GetPath().AppendChild(new_name)
+    
+    # Define the new prim in the target stage, preserving its type name
+    new_prim = target_parent_prim.GetStage().DefinePrim(new_path, source_prim.GetTypeName())
+    if not new_prim:
+        print(f"      Warning: Failed to define new prim at {new_path}. Skipping subtree copy for {source_prim.GetPath()}")
+        return
+
+    # Copy all authored attributes from the source prim to the new prim
+    for attr in source_prim.GetAttributes():
+        attr_name = attr.GetName()
+        attr_type = attr.GetTypeName()
+        
+        if attr.HasAuthoredValue():
+            # Special handling for UsdGeom.Mesh specific primvars: normals and UVs
+            if new_prim.IsA(UsdGeom.Mesh):
+                new_mesh_prim = UsdGeom.Mesh(new_prim)
+                source_geom_prim = UsdGeom.Imageable(source_prim) # Used to get source primvar for interpolation
+
+                if attr_name == UsdGeom.Tokens.normals:
+                    new_normals_attr = new_mesh_prim.GetNormalsAttr()
+                    new_normals_attr.Set(attr.Get())
+                    # Get and set interpolation for normals
+                    source_primvar = source_geom_prim.GetPrimvar(UsdGeom.Tokens.normals)
+                    if source_primvar and source_primvar.HasAuthoredInterpolation():
+                        new_normals_attr.SetMetadata("interpolation", source_primvar.GetInterpolation())
+                    print(f"        Copied and explicitly set normals attribute: {attr_name}")
+                elif attr_name.startswith("primvars:st"):
+                    # Extract just "st" from "primvars:st" or "primvars:st0" etc.
+                    primvar_base_name = attr_name.split(':', 1)[-1] 
+                    new_st_primvar = new_mesh_prim.CreatePrimvar(primvar_base_name, attr_type)
+                    new_st_primvar.Set(attr.Get())
+                    # Get and set interpolation for UVs
+                    source_primvar = source_geom_prim.GetPrimvar(attr_name)
+                    if source_primvar and source_primvar.HasAuthoredInterpolation():
+                        new_st_primvar.SetInterpolation(source_primvar.GetInterpolation())
+                    print(f"        Copied and explicitly set UV (st) primvar: {attr_name}")
+                else:
+                    # Generic attribute copy for other attributes on a mesh prim
+                    new_attr_generic = new_prim.CreateAttribute(attr_name, attr_type)
+                    new_attr_generic.Set(attr.Get())
+                    print(f"        Copied general attribute on mesh: {attr_name} ({attr_type})")
+            else:
+                # Generic attribute copy for non-mesh prims
+                new_attr_generic = new_prim.CreateAttribute(attr_name, attr_type)
+                new_attr_generic.Set(attr.Get())
+                print(f"        Copied general attribute: {attr_name} ({attr_type})")
+        else:
+            print(f"      Skipped unauthored attribute: {attr_name}")
+    
+    # Copy all metadata from the source prim to the new prim
+    for key, value in source_prim.GetAllMetadata().items():
+        # Skip metadata that is automatically set by DefinePrim or SetTypeName to avoid conflicts
+        if key not in ['specifier', 'typeName']:
+            new_prim.SetMetadata(key, value)
+    
+    # Copy relationships (e.g., material bindings, collections)
+    for rel in source_prim.GetRelationships():
+        new_rel = new_prim.CreateRelationship(rel.GetName())
+        new_rel.SetTargets(rel.GetTargets()) # Set targets as Sdf.Path objects
+
+    # Recursively call this function for all children of the source prim
+    for child in source_prim.GetChildren():
+        _copy_prim_recursive(child, new_prim, base_id)
+
+
+def _prim_contains_mesh(prim: Usd.Prim) -> bool:
+    """
+    Recursively checks if the given prim or any of its descendants is a UsdGeom.Mesh.
+    """
+    if prim.IsA(UsdGeom.Mesh):
+        return True
+    
+    for child in prim.GetChildren():
+        if _prim_contains_mesh(child):
+            return True
+    return False
+
+
+def rename_usd_primitives(usd_path: str, base_id: str) -> str:
+    """
+    Creates a new USD file by copying the relevant asset prim
+    from the original USD, renaming it to the base_id, and saving it as a new file.
+    This ensures all attributes are preserved and the asset root prim
+    matches the base_id.
+    Returns the path to the newly created USD file.
+    """
+    # Create a modified filename in the same directory as the original
+    original_dir = os.path.dirname(usd_path)
+    original_name = os.path.basename(usd_path)
+    modified_name = f"modified_{original_name}"
+    modified_path = os.path.join(original_dir, modified_name)
+    
+    print(f"  Preparing to modify USD file: {original_name} -> {modified_name}")
+    print(f"  Target base_id: {base_id}")
+    
+    # Open the original USD file as the source stage
+    source_stage = Usd.Stage.Open(usd_path)
+    if not source_stage:
+        raise RuntimeError(f"Failed to open source USD file: {usd_path}")
+    
+    # Create a new, empty USD stage in memory to build the modified asset
+    new_stage = Usd.Stage.CreateNew(modified_path)
+    if not new_stage:
+        raise RuntimeError(f"Failed to create new USD stage at: {modified_path}")
+
+    # Find the most suitable "asset root" prim in the source stage to copy and rename.
+    # This is the highest non-root/non-world prim that contains mesh geometry.
+    prim_to_rename_candidate = None
+    for prim in source_stage.Traverse():
+        # Skip the absolute root prim '/' and common top-level scene containers like '/World'
+        if prim.GetPath() == Sdf.Path.absoluteRootPath or prim.GetName() == "World":
+            continue
+
+        # Check if this prim itself is a mesh, or if it has any UsdGeom.Mesh descendants
+        if _prim_contains_mesh(prim):
+            # If we haven't found a candidate yet, or if this new candidate is an
+            # ancestor of the current best candidate, update our best candidate.
+            # This ensures we pick the highest relevant prim that is a container for meshes.
+            if prim_to_rename_candidate is None or \
+               prim_to_rename_candidate.GetPath().HasPrefix(prim.GetPath()):
+                prim_to_rename_candidate = prim
+    
+    # If no suitable prim containing mesh data was found, log a warning and return original path
+    if not prim_to_rename_candidate:
+        print(f"  Warning: No suitable asset root prim containing mesh data found for renaming in {original_name}. Skipping renaming.")
+        # If no modification is done, we might still want to return the original path for import
+        return usd_path
+
+    # The chosen prim from the source stage to copy and rename
+    source_asset_root_prim = prim_to_rename_candidate
+
+    # IMPORTANT: Use the base_id parameter, not the source prim name
+    # Define the new root prim in the new stage, at the root level, with the desired base_id name.
+    new_asset_root_path = Sdf.Path.absoluteRootPath.AppendChild(base_id)
+    new_asset_root_prim = new_stage.DefinePrim(new_asset_root_path, source_asset_root_prim.GetTypeName())
+    
+    if not new_asset_root_prim:
+        raise RuntimeError(f"Failed to define new asset root prim at {new_asset_root_path} in new stage.")
+
+    print(f"    Copying and renaming asset root from '{source_asset_root_prim.GetPath()}' to '{new_asset_root_path}' in new file.")
+    print(f"    Using base_id '{base_id}' as the new prim name (ignoring source name '{source_asset_root_prim.GetName()}')")
+
+    # Copy all attributes, metadata, and relationships from the source asset root to the new asset root
+    for attr in source_asset_root_prim.GetAttributes():
+        new_attr = new_asset_root_prim.CreateAttribute(attr.GetName(), attr.GetTypeName())
+        if attr.HasAuthoredValue():
+            new_attr.Set(attr.Get())
+
+    for key, value in source_asset_root_prim.GetAllMetadata().items():
+        if key not in ['specifier', 'typeName']:
+            new_asset_root_prim.SetMetadata(key, value)
+
+    for rel in source_asset_root_prim.GetRelationships():
+        new_rel = new_asset_root_prim.CreateRelationship(rel.GetName())
+        new_rel.SetTargets(rel.GetTargets())
+
+    # Recursively copy all children (and their entire subtrees) from the source asset root
+    # to be under the newly created asset root in the new stage.
+    print(f"    Recursively copying children from {source_asset_root_prim.GetPath()} to {new_asset_root_path}...")
+    for child in source_asset_root_prim.GetChildren():
+        _copy_prim_recursive(child, new_asset_root_prim, base_id)
+    
+    # Save the newly created USD file
+    new_stage.Save()
+    print(f"  Saved modified USD: {modified_path}")
+    
+    return modified_path
 
 
 class HipManager(ABC):
@@ -27,6 +258,25 @@ class HipManager(ABC):
 
 
 class HoudiniHipManager(HipManager):
+    def get_material_prefixes_from_usds(self, usd_paths: List[str]) -> List[str]:
+        """
+        Extract material prefixes from USD file paths, filtering out modified files.
+        Returns the base identifiers that should be used for material creation.
+        """
+        prefixes = []
+        for usd_path in usd_paths:
+            filename = os.path.basename(usd_path)
+            
+            # Skip modified USD files - we only want original files for prefix extraction
+            if filename.startswith("modified_"):
+                continue
+                
+            # Extract the base identifier from the original filename
+            base_id = extract_base_identifier_from_filename(filename)
+            prefixes.append(base_id)
+        
+        return sorted(set(prefixes))  # Remove duplicates and sort
+
     def load(self, hip_path: str) -> None:
         if not os.path.isfile(hip_path):
             raise FileNotFoundError(f"HIP file not found: {hip_path}")
@@ -58,20 +308,55 @@ class HoudiniHipManager(HipManager):
         if default:
             default.destroy()
 
-        # 3) USD Import SOP per USD
-        file_nodes = []
+        # 3) Create a mapping of USD files to their base identifiers
+        # And rename primitives within the USD files
+        usd_mapping = {}
+        processed_usd_paths = [] # To store paths of modified USD files
         for usd in usd_paths:
             if not os.path.isfile(usd):
-                raise FileNotFoundError(f"USD file not found: {usd}")
-            base = os.path.splitext(os.path.basename(usd))[0]
-            usd_sop = container.createNode("usdimport", f"import_{base}")
+                print(f"Warning: USD file not found: {usd}. Skipping.")
+                continue
 
-            # Dynamically find a string parm whose name contains "file"
+            filename = os.path.basename(usd)
+            base_id = extract_base_identifier_from_filename(filename)
+            usd_mapping[filename] = base_id
+            
+            print(f"Processing USD: {filename}")
+            print(f"  Extracted base_id: {base_id}")
+            
+            # Rename primitives in the USD file by creating a new, modified USD file
+            modified_usd_path = rename_usd_primitives(usd, base_id)
+            processed_usd_paths.append(modified_usd_path)
+            
+            print(f"  Created modified USD: {os.path.basename(modified_usd_path)}")
+            print(f"  Should contain primitive named: {base_id}")
+            print("  " + "-"*50)
+            
+        # Save the mapping to a JSON file in $HIP (useful for material assignment later)
+        hip_dir = hou.expandString("$HIP")
+        mapping_file = os.path.join(hip_dir, "usd_material_mapping.json")
+        with open(mapping_file, 'w') as f:
+            json.dump(usd_mapping, f, indent=2)
+        
+        print(f"Saved USD mapping to: {mapping_file}")
+        print(f"Mapping: {usd_mapping}")
+
+        # 4) USD Import SOP per processed USD file
+        file_nodes = []
+        for usd_original_path, usd_processed_path in zip(usd_paths, processed_usd_paths):
+            # The base_id comes from the original filename
+            filename = os.path.basename(usd_original_path)
+            base_id = usd_mapping[filename]
+
+            # Create USD import node
+            usd_sop = container.createNode("usdimport", f"import_{base_id}")
+
+            # Set the USD file path to the *modified* USD file
             matched = False
             for parm in usd_sop.parms():
                 tmpl = parm.parmTemplate()
                 if tmpl.type() == hou.parmTemplateType.String and "file" in parm.name().lower():
-                    parm.set(usd)
+                    parm.set(usd_processed_path) # Use the processed USD path
                     matched = True
                     break
             if not matched:
@@ -84,43 +369,58 @@ class HoudiniHipManager(HipManager):
             usd_sop.moveToGoodPosition()
             file_nodes.append(usd_sop)
 
-        # 4) Merge
+        # 5) Merge
         merge = container.createNode("merge", "merge_usds")
         for idx, fn in enumerate(file_nodes):
             merge.setInput(idx, fn)
         merge.moveToGoodPosition()
 
-        # 5) OUT null
+        # 6) Add an Attribute Wrangle to set USD filename as an attribute
+        filename_wrangle = container.createNode("attribwrangle", "set_usd_filename")
+        filename_wrangle.setInput(0, merge)
+        
+        # VEX code to set the usd_filename attribute based on the path
+        vex_code = '''// Set USD filename attribute based on the import path
+// This VEX is primarily for debugging or additional info;
+// The Python logic now handles prim renaming directly.
+string path = s@path;
+s@usd_source_id = getattribute(0, "primitive", "name"); // Get the prim name itself
+'''
+        
+        filename_wrangle.parm("snippet").set(vex_code)
+        filename_wrangle.moveToGoodPosition()
+
+        # 7) OUT null
         out_null = container.createNode("null", "OUT")
-        out_null.setInput(0, merge)
+        out_null.setInput(0, filename_wrangle)
         out_null.moveToGoodPosition()
 
-        # 6) Rotate X -90 (Z-up → Y-up)
+        # 8) Rotate X -90 (Z-up → Y-up)
         xform = container.createNode("xform", "z_to_y")
         xform.setInput(0, out_null)
         xform.parm("rx").set(-90)
         xform.moveToGoodPosition()
 
-        # 7) Connectivity
+        # 9) Connectivity
         conn = container.createNode("connectivity", "connectivity_prim_wedge")
         conn.setInput(0, xform)
         conn.parm("connecttype").set(1)
         conn.parm("attribname").set("wedge")
         conn.moveToGoodPosition()
 
-        # 8) Blast
+        # 10) Blast
         blast = container.createNode("blast", "blast_wedge")
         blast.setInput(0, conn)
         blast.parm("group").set('!@wedge==@wedgenum')
         blast.moveToGoodPosition()
 
-        # 9) Unpack USD
+        # 11) Unpack USD
         unpack = container.createNode("unpackusd", "unpack_usd")
         unpack.setInput(0, blast)
         unpack.parm("output").set("polygons")
         unpack.moveToGoodPosition()
 
-        # 10) HDA (optional)
+        # 12) HDA (optional)
         last_node = unpack
         if hda_path:
             if not os.path.isfile(hda_path):
@@ -135,102 +435,11 @@ class HoudiniHipManager(HipManager):
             hda_node.moveToGoodPosition()
             last_node = hda_node
 
-        # 11) Final null & display
+        # 13) Final null & display
         final_null = container.createNode("null", "FINAL_OUT")
         final_null.setInput(0, last_node)
         final_null.setDisplayFlag(True)
         final_null.moveToGoodPosition()
 
-        # 12) Layout
+        # 14) Layout
         container.layoutChildren()
-
-
-
-# pipeline/material_manager.py
-
-def assign_mtlx_materials(assets_dir: str, prefixes: List[str]) -> None:
-    """
-    In /stage:
-      - create a Material Library LOP
-      - dive into it and build a USD MaterialX Builder
-      - for each prefix, create:
-          • a MtlX Standard Surface
-          • a Texcoord (Vector2)
-          • three MtlX Image nodes (diffuse, MR, normal)
-          • a Separate3 node to split metallic/roughness
-        wire them up
-      - go back up and AssignMaterial each material to the matching prims
-    """
-    stage = hou.node("/stage") or hou.node("/obj").createNode("lopnet", "stage")
-    matlib = stage.createNode("materiallibrary", "mtlx_library")
-    matlib.moveToGoodPosition()
-
-    # Create a builder inside the Material Library
-    builder = matlib.createNode("usdMaterialXBuilder", "mtlx_builder")
-    builder.moveToGoodPosition()
-
-    # Dive inside the builder to create VOPs
-    inside = builder
-
-    for prefix in prefixes:
-        # 1) Standard Surface shader
-        surf = inside.createNode("mtlxstandard_surface", f"mat_{prefix}")
-        surf.moveToGoodPosition()
-
-        # 2) UV coords
-        tc = inside.createNode("mtlxtexcoord", f"tc_{prefix}")
-        tc.parm("signature").set("vector2")        # Vector2 texcoords :contentReference[oaicite:0]{index=0}
-        tc.moveToGoodPosition()
-
-        # 3) Diffuse map
-        img_diff = inside.createNode("mtlximage", f"diff_{prefix}")
-        img_diff.parm("filename").set(
-            os.path.join(assets_dir, f"{prefix}_texture_diff.png")
-        )
-        img_diff.setInput(0, tc)                   # wire texcoord → image :contentReference[oaicite:1]{index=1}
-        img_diff.moveToGoodPosition()
-        surf.setInput("base_color", img_diff)       # wire image → base_color
-
-        # 4) Metallic/Roughness map (packed in RGB)
-        img_mr = inside.createNode("mtlximage", f"mr_{prefix}")
-        img_mr.parm("filename").set(
-            os.path.join(assets_dir, f"{prefix}_texture_MR.png")
-        )
-        img_mr.setInput(0, tc)
-        img_mr.moveToGoodPosition()
-
-        # split RGB: R→metallic, G→roughness
-        sep = inside.createNode("separate3", f"sep_{prefix}")
-        sep.setInput(0, img_mr)
-        sep.moveToGoodPosition()
-        surf.setInput("metallic", sep, 0)           # R channel
-        surf.setInput("roughness", sep, 1)         # G channel
-
-        # 5) Normal map
-        img_n = inside.createNode("mtlximage", f"norm_{prefix}")
-        img_n.parm("filename").set(
-            os.path.join(assets_dir, f"{prefix}_texture_normal.png")
-        )
-        img_n.setInput(0, tc)
-        img_n.moveToGoodPosition()
-
-        # hook into the standard‐surface normal input via a MtlX Normal Map node
-        normmap = inside.createNode("mtlxnormalmap", f"nmap_{prefix}")
-        normmap.setInput(0, img_n)                 # image → normalmap
-        normmap.moveToGoodPosition()
-        surf.setInput("normal", normmap)           # normalmap → surface normal
-
-    # lay out inside the builder neatly
-    inside.layoutChildren()
-
-    # 6) Back in /stage: assign each material
-    for prefix in prefixes:
-        mat_path = f"{matlib.path()}/mtlx_builder/mat_{prefix}"
-        assign = stage.createNode("assignmaterial", f"assign_{prefix}")
-        assign.moveToGoodPosition()
-        assign.parm("materialpath").set(mat_path)
-        # match any prim whose name starts with the prefix
-        assign.parm("primpattern").set(f"/root/world/assets/{prefix}*")
-
-    # layout the /stage tree
-    stage.layoutChildren()

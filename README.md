@@ -1,49 +1,80 @@
-Instructions:
+# StyrofoamWrap
 
-1) Clone the repo
-   git clone git@github.com:j3borquez/StyrofoamWrap.git
-   cd StyrofoamWrap
+A procedural pipeline to import USD assets into Houdini, wrap them in styrofoam bases, and submit simulation/render jobs to Deadline.
 
-2) Create & activate your Python venv
-   python -m venv .venv
-   .venv\Scripts\Activate.ps1    # PowerShell
-   # (or .venv\Scripts\activate.bat in CMD)
+---
 
-3) Install project & Python deps
-   pip install --upgrade pip setuptools wheel tomli
-   pip install -e .               # registers pipeline/ and pydantic-settings
-   pip install pytest pydantic pydantic-settings
+## Prerequisites
 
-4) Prepare Houdini’s Python (hython)
-   $Env:HFS = "C:\Program Files\Side Effects Software\Houdini19.5.805"
-   # Ensure hython and pip are available:
-   & "$Env:HFS\bin\hython.exe" -m pip --version
-   & "$Env:HFS\bin\hython.exe" -m pip install -e . pytest pydantic pydantic-settings
+- **Houdini 19.5.805** installed on Windows.
+- A clone of this repository: `E:\Project_Work\Amazon\StyrofoamWrap`.
+- Python 3.8+ installed for running `env_setup.py`.
 
-5) Configure your assets and HIP
-   Create a .env at the project root with:
-   STYROFOAM_ASSETS_DIR=E:\Project_Work\Amazon\StyrofoamWrap\Assets
-   STYROFOAM_HIP_PATH=E:\Project_Work\Amazon\StyrofoamWrap\styrofoam_w_v01.hiplc
+---
 
-(Optional) Install DeadlineSubmitter
-If you’ve implemented pipeline/job_submitter.py, install any extra farm-API deps here.
+## 1. Bootstrap Houdini’s Python Environment
 
-Run & verify tests
+Run the helper script to register this project and `pytest` into Houdini’s `hython`:
 
-Locally (pure-Python):
-pytest -q
+```powershell
+python env_setup.py `
+  --houdini-path "C:\Program Files\Side Effects Software\Houdini19.5.805" `
+  --project-path "E:\Project_Work\Amazon\StyrofoamWrap"
+```
 
-Under hython (exercises real hou API):
-& "$Env:HFS\bin\hython.exe" -m pytest -q
+This will:
+1. Verify that `pip` is available in `hython` (or instruct manual installation).
+2. Install this package in editable mode.
+3. Install `pytest` into Houdini’s Python.
 
-Launch the pipeline
-& "$Env:HFS\bin\hython.exe" -m pipeline.cli --launch
-This command will:
-* Imports every USD into your HIP
-* Saves the HIP
-* Submits sim/render (if configured)
-* Opens Houdini GUI with the updated file
+---
 
-Dry-run preview
-To see what would happen without writing or submitting:
-hython -m pipeline.cli --dry-run
+## 2. (If Needed) Manually Install `pip` into `hython`
+
+If the bootstrap script indicates `pip` is missing, do the following:
+
+1. **Download** the `get-pip.py` installer from:
+   ```text
+   https://bootstrap.pypa.io/get-pip.py
+   ```
+2. **Run** it with `hython`:
+   ```powershell
+   $hython = "C:\Program Files\Side Effects Software\Houdini19.5.805\bin\hython.exe"
+   & $hython ".\get-pip.py"
+   ```
+3. **Log in** to your SideFX account if prompted.
+
+---
+
+## 3. Verify `pip` Installation
+
+```powershell
+& $hython -m pip --version
+```
+
+You should see output similar to `pip 24.x.x from ... (python 3.9)`.
+
+---
+
+## 4. Install Project & Test Dependencies
+
+```powershell
+& $hython -m pip install -e "E:\Project_Work\Amazon\StyrofoamWrap"
+& $hython -m pip install pytest
+```
+
+---
+
+## 5. Run Unit Tests
+
+Execute the test suite against the real `hou` API under `hython`:
+
+```powershell
+& $hython -m pytest -q
+```
+
+All tests should pass without errors.
+
+---
+
+**
