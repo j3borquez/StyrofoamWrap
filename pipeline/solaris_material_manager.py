@@ -102,6 +102,27 @@ def extract_base_identifier(prefix: str) -> str:
     # If no random suffix pattern found, return the full prefix
     return prefix
 
+def clear_lop_network_children(lop_network):
+    """
+    Safely clear all children from a LOP network
+    """
+    try:
+        children = lop_network.children()
+        if children:
+            print(f"    Removing {len(children)} child nodes...")
+            for child in children:
+                try:
+                    print(f"      Removing node: {child.name()}")
+                    child.destroy()
+                except Exception as e:
+                    print(f"      Warning: Could not destroy node {child.name()}: {e}")
+            print(f"    Successfully cleared LOP network.")
+        else:
+            print(f"    LOP network is already empty.")
+    except Exception as e:
+        print(f"    Error clearing LOP network: {e}")
+        raise
+
 # --- Solaris/LOPs Workflow Functions ---
 
 def find_texture_files(assets_dir: str, base_id: str) -> dict:
@@ -303,7 +324,7 @@ def build_solaris_material_network(lop_net: hou.Node, prefixes: List[str], asset
     # 3. Create a Material Library LOP
     mat_lib = lop_net.createNode("materiallibrary", "generated_materials")
     safe_set_parm(mat_lib, "matpathprefix", "/materials/")
-    safe_set_parm(mat_lib, "matflag", 0)  # Set matflag to 0 by default
+    safe_set_parm(mat_lib, "matflag1", 0)  # Set matflag to 0 by default
     
     # Material library gets connected to merge input 1
     merge_node.setInput(1, mat_lib)
@@ -505,7 +526,7 @@ def setup_solaris_materials_from_sops(sop_geo_path: str, prefixes: List[str], as
         print(f"Created new LOP network at: '{lop_net.path()}'")
     else:
         print(f"Found existing LOP network at '{lop_net.path()}'. Clearing its contents.")
-        lop_net.children().destroyAll()
+        clear_lop_network_children(lop_net)  # Fixed: Use the proper clearing function
 
     # 2. Create a SOP Import LOP inside the LOP network.
     geo_name = os.path.basename(sop_geo_path.strip("/"))
@@ -545,7 +566,9 @@ if __name__ == "__main__":
         assets_geo = obj_net.node(os.path.basename(SOP_GEO_PATH.strip('/')))
         if not assets_geo:
             assets_geo = obj_net.createNode("geo", os.path.basename(SOP_GEO_PATH.strip('/')))
-        assets_geo.children().destroyAll()
+        
+        # Fixed: Use the proper clearing function for example code too
+        clear_lop_network_children(assets_geo)
 
         last_node = None
         for i, prefix in enumerate(ASSET_PREFIXES):

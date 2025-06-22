@@ -161,6 +161,11 @@ def rename_usd_primitives(usd_path: str, base_id: str) -> str:
     modified_name = f"modified_{original_name}"
     modified_path = os.path.join(original_dir, modified_name)
     
+    # Check if modified file already exists and skip if it does
+    if os.path.exists(modified_path):
+        print(f"  Modified USD file already exists: {modified_name}. Skipping modification.")
+        return modified_path
+    
     print(f"  Preparing to modify USD file: {original_name} -> {modified_name}")
     print(f"  Target base_id: {base_id}")
     
@@ -238,6 +243,24 @@ def rename_usd_primitives(usd_path: str, base_id: str) -> str:
     return modified_path
 
 
+def _create_unique_hip_filename(hip_path: str) -> str:
+    """
+    Create a unique HIP filename if the target already exists.
+    Appends incrementing numbers until a unique filename is found.
+    """
+    if not os.path.exists(hip_path):
+        return hip_path
+    
+    base_path, ext = os.path.splitext(hip_path)
+    counter = 1
+    
+    while True:
+        new_path = f"{base_path}_{counter:03d}{ext}"
+        if not os.path.exists(new_path):
+            return new_path
+        counter += 1
+
+
 class HipManager(ABC):
     @abstractmethod
     def load(self, hip_path: str) -> None:
@@ -284,7 +307,11 @@ class HoudiniHipManager(HipManager):
 
     def save(self, hip_path: Optional[str] = None) -> None:
         if hip_path:
-            hou.hipFile.save(hip_path)
+            # Create unique filename if target already exists
+            unique_hip_path = _create_unique_hip_filename(hip_path)
+            if unique_hip_path != hip_path:
+                print(f"Target HIP file already exists. Saving as: {os.path.basename(unique_hip_path)}")
+            hou.hipFile.save(unique_hip_path)
         else:
             hou.hipFile.save()
 
@@ -294,6 +321,21 @@ class HoudiniHipManager(HipManager):
         obj_name: str = "assets",
         hda_path: Optional[str] = None
     ) -> None:
+        # Filter out any modified USD files from the input list to avoid duplicates
+        filtered_usd_paths = []
+        for usd_path in usd_paths:
+            filename = os.path.basename(usd_path)
+            if filename.startswith("modified_"):
+                print(f"Skipping modified USD file from input: {filename}")
+                continue
+            filtered_usd_paths.append(usd_path)
+        
+        usd_paths = filtered_usd_paths
+        
+        if not usd_paths:
+            print("Warning: No valid USD files to process after filtering.")
+            return
+
         # 1) Grab /obj
         obj = hou.node("/obj")
         if obj is None:
@@ -375,53 +417,43 @@ class HoudiniHipManager(HipManager):
             merge.setInput(idx, fn)
         merge.moveToGoodPosition()
 
-        # 6) Add an Attribute Wrangle to set USD filename as an attribute
-        filename_wrangle = container.createNode("attribwrangle", "set_usd_filename")
-        filename_wrangle.setInput(0, merge)
-        
-        # VEX code to set the usd_filename attribute based on the path
-        vex_code = '''// Set USD filename attribute based on the import path
-// This VEX is primarily for debugging or additional info;
-// The Python logic now handles prim renaming directly.
-string path = s@path;
-s@usd_source_id = getattribute(0, "primitive", "name"); // Get the prim name itself
-'''
-        
-        filename_wrangle.parm("snippet").set(vex_code)
-        filename_wrangle.moveToGoodPosition()
-
-        # 7) OUT null
+        # 6) OUT null
         out_null = container.createNode("null", "OUT")
-        out_null.setInput(0, filename_wrangle)
+        out_null.setInput(0, merge)
         out_null.moveToGoodPosition()
 
-        # 8) Rotate X -90 (Z-up → Y-up)
+        # 7) Rotate X -90 (Z-up → Y-up)
         xform = container.createNode("xform", "z_to_y")
         xform.setInput(0, out_null)
         xform.parm("rx").set(-90)
         xform.moveToGoodPosition()
 
-        # 9) Connectivity
+        # 8) Connectivity
         conn = container.createNode("connectivity", "connectivity_prim_wedge")
         conn.setInput(0, xform)
         conn.parm("connecttype").set(1)
         conn.parm("attribname").set("wedge")
         conn.moveToGoodPosition()
 
-        # 10) Blast
+        # 9) Blast
         blast = container.createNode("blast", "blast_wedge")
         blast.setInput(0, conn)
         blast.parm("group").set('!@wedge==@wedgenum')
         blast.moveToGoodPosition()
 
-        # 11) Unpack USD
+        # 10) Unpack USD
         unpack = container.createNode("unpackusd", "unpack_usd")
         unpack.setInput(0, blast)
         unpack.parm("output").set("polygons")
         unpack.moveToGoodPosition()
 
+        # 11) Normal node (compute face/vertex normals)
+        normal = container.createNode("normal", "compute_normals")
+        normal.setInput(0, unpack)
+        normal.moveToGoodPosition()
+
         # 12) HDA (optional)
-        last_node = unpack
+        last_node = normal
         if hda_path:
             if not os.path.isfile(hda_path):
                 raise FileNotFoundError(f"HDA file not found: {hda_path}")
@@ -431,7 +463,7 @@ s@usd_source_id = getattribute(0, "primitive", "name"); // Get the prim name its
                 raise RuntimeError(f"No HDA definitions found in {hda_path}")
             hda_type = defs[0].nodeTypeName()
             hda_node = container.createNode(hda_type, "wrapped_assets")
-            hda_node.setInput(0, unpack)
+            hda_node.setInput(0, normal)
             hda_node.moveToGoodPosition()
             last_node = hda_node
 

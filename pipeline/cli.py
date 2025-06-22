@@ -9,10 +9,13 @@ from pathlib import Path
 # Make sure these modules are available in your Python environment
 from pipeline.config import settings
 from pipeline.asset_locator import FilesystemLocator
+
+# --- Updated Hip Manager Import with Fixed Code ---
+# Import the corrected HoudiniHipManager class
 from pipeline.hip_manager import HoudiniHipManager
 
 # --- Updated Material Manager Import ---
-# We now import the new high-level function for Solaris.
+# We now import the corrected high-level function for Solaris.
 from pipeline.solaris_material_manager import setup_solaris_materials_from_sops
 
 # Attempt to import the Deadline submitter, but don't fail if it's not there.
@@ -35,6 +38,10 @@ def main():
         "--launch", action="store_true",
         help="After processing, launch the Houdini GUI with the modified HIP file."
     )
+    parser.add_argument(
+        "--clean-modified", action="store_true",
+        help="Remove existing modified USD files before processing."
+    )
     args = parser.parse_args()
 
     # --- Path Resolution ---
@@ -44,30 +51,51 @@ def main():
     print(f"Project Assets Directory: {assets_dir}")
     print(f"Houdini Project File: {hip_path}")
 
-    # 1. Discover Assets
+    # 1. Clean modified files if requested
+    if args.clean_modified:
+        print("Cleaning existing modified USD files...")
+        import glob
+        modified_files = glob.glob(str(assets_dir / "modified_*.usd"))
+        for modified_file in modified_files:
+            try:
+                os.remove(modified_file)
+                print(f"  Removed: {os.path.basename(modified_file)}")
+            except Exception as e:
+                print(f"  Warning: Could not remove {modified_file}: {e}")
+
+    # 2. Discover Assets
     locator = FilesystemLocator()
     usds = locator.find_usds(str(assets_dir))
-    print(f"Found {len(usds)} USD file(s): {usds}")
+    print(f"Found {len(usds)} USD file(s): {[os.path.basename(f) for f in usds]}")
 
-    # 2. Load the Houdini HIP File
+    # Filter out modified files for processing feedback
+    original_usds = [usd for usd in usds if not os.path.basename(usd).startswith("modified_")]
+    modified_usds = [usd for usd in usds if os.path.basename(usd).startswith("modified_")]
+    
+    if modified_usds:
+        print(f"Skipping {len(modified_usds)} existing modified USD files")
+    
+    print(f"Will process {len(original_usds)} original USD files")
+
+    # 3. Load the Houdini HIP File
     hip_mgr = HoudiniHipManager()
     print(f"Loading HIP file: {hip_path}")
     hip_mgr.load(str(hip_path))
 
     # Derive material prefixes from the discovered USD file names, excluding modified files
-    if not usds:
-        print(f"Warning: No USD files found in {assets_dir}. Cannot create materials.")
+    if not original_usds:
+        print(f"Warning: No original USD files found in {assets_dir}. Cannot create materials.")
         prefixes = []
     else:
         # Use the hip_manager method to get clean prefixes from original USD files only
-        prefixes = hip_mgr.get_material_prefixes_from_usds(usds)
+        prefixes = hip_mgr.get_material_prefixes_from_usds(original_usds)
     print(f"Found {len(prefixes)} unique material prefixes: {prefixes}")
 
     # This code block requires a running Houdini session (e.g., via hython)
     try:
         import hou
         
-        # 3. Set Houdini Up-Axis
+        # 4. Set Houdini Up-Axis
         axis = settings.up_axis.lower()
         if axis in ("y", "z"):
             print(f"Setting Houdini up-axis to '{axis.upper()}'.")
@@ -75,7 +103,7 @@ def main():
         else:
             print(f"Warning: Invalid up_axis '{settings.up_axis}' in config. Skipping.")
 
-        # 4. Import Geometry (and optionally install an HDA)
+        # 5. Import Geometry (and optionally install an HDA)
         # This step creates the geometry in `/obj/assets` which we will later import into Solaris.
         print("Importing assets into SOPs context at '/obj/assets'...")
         sop_geo_path = "/obj/assets"
@@ -89,12 +117,20 @@ def main():
             else:
                 print(f"Warning: HDA file not found at '{hda_file}'.")
 
+        # Show USD processing details
+        for usd_path in original_usds:
+            filename = os.path.basename(usd_path)
+            modified_path = os.path.join(os.path.dirname(usd_path), f"modified_{filename}")
+            if os.path.exists(modified_path):
+                print(f"  - Will reuse existing modified file for: {filename}")
+            else:
+                print(f"  - Will create modified file for: {filename}")
+
         # The hip_manager should create or clear the geo node and import the assets.
-        hip_mgr.import_usds(usds, obj_name="assets", hda_path=hda_to_install)
+        hip_mgr.import_usds(original_usds, obj_name="assets", hda_path=hda_to_install)
         print(f"Assets imported to '{sop_geo_path}'.")
 
-        # 5. Build and Assign Materials in Solaris
-        # The check for the /stage node has been removed from this script.
+        # 6. Build and Assign Materials in Solaris
         # The setup_solaris_materials_from_sops function now handles LOP network creation.
         if prefixes:
             setup_solaris_materials_from_sops(
@@ -112,20 +148,47 @@ def main():
              print("This script must be run with 'hython' from a Houdini installation.")
         else:
              print(f"\nAn error occurred during Houdini processing: {e}")
+             import traceback
+             traceback.print_exc()
         return # Exit if we can't do the main work
 
-    # 6. Save the HIP File and Submit Jobs
+    # 7. Save the HIP File and Submit Jobs
     if not args.dry_run:
-        print(f"\nSaving HIP file to: {hip_path}")
-        hip_mgr.save(str(hip_path))
+        print(f"\nPreparing to save HIP file...")
+        
+        # Check if the target HIP file already exists and inform user
+        if hip_path.exists():
+            print(f"Warning: HIP file already exists at {hip_path}")
+            print("A new unique filename will be created automatically.")
+        
+        # Save and capture the actual path used (in case it was modified for uniqueness)
+        try:
+            # Save the HIP file
+            hip_mgr.save(str(hip_path))
+            
+            # Get the actual saved path from Houdini
+            actual_saved_path = hou.hipFile.path()
+            
+            if actual_saved_path != str(hip_path):
+                print(f"HIP file saved to unique path: {actual_saved_path}")
+                hip_path = Path(actual_saved_path)  # Update for launch command
+            else:
+                print(f"HIP file saved successfully to: {hip_path}")
+                
+        except Exception as e:
+            print(f"Error saving HIP file: {e}")
+            return
 
         if DeadlineSubmitter:
             print("Submitting jobs to Deadline...")
             submitter = DeadlineSubmitter(settings.deadline_command)
             
+            # Use the actual saved path for job submission
+            actual_hip_path = hou.hipFile.path()
+            
             # Submit simulation job
             sim_id = submitter.submit_simulation(
-                str(hip_path),
+                actual_hip_path,
                 settings.frame_range,
                 settings.sim_output_driver,
             )
@@ -133,7 +196,7 @@ def main():
 
             # Submit render job, dependent on the simulation
             rend_id = submitter.submit_render(
-                str(hip_path),
+                actual_hip_path,
                 settings.frame_range,
                 settings.render_output_driver,
                 depends_on=sim_id,
@@ -144,7 +207,7 @@ def main():
     else:
         print("\n[Dry Run] Skipping HIP file save and job submission.")
 
-    # 7. Launch Houdini GUI if Requested
+    # 8. Launch Houdini GUI if Requested
     if args.launch:
         hfs = os.getenv("HFS")
         if not hfs:
