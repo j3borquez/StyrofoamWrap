@@ -55,8 +55,8 @@ def connect_vop_nodes(dest_node, dest_input_name, src_node, src_output_idx=0):
                 return True
 
         input_map = {
-            "base_color": 1, "base": 1, "metallic": 4, "metalness": 4, 
-            "specular_roughness": 5, "roughness": 5, "normal": 40,
+            "base_color": 1, "base": 1, "metallic": 3, "metalness": 3, 
+            "specular_roughness": 6, "roughness": 6, "normal": 40,
         }
         if dest_input_name.lower() in input_map:
             dest_node.setInput(input_map[dest_input_name.lower()], src_node, src_output_idx)
@@ -224,12 +224,32 @@ def create_solaris_mtlx_shader(material_library: hou.Node, prefix: str, assets_d
             sep_mr.setInput(0, img_mr)
             
             try:
-                # Connect R channel to metallic (input 4) and G channel to roughness (input 5)
-                std_surface.setInput(4, sep_mr, 0)  # R channel to metallic
-                std_surface.setInput(5, sep_mr, 1)  # G channel to roughness
-                print(f"    ✓ Connected metallic/roughness texture")
-            except:
-                print(f"    ✗ Failed to connect metallic/roughness")
+                # Find the correct input indices for metallic and specular roughness
+                # Print available inputs for debugging
+                input_labels = std_surface.inputLabels()
+                print(f"    Available inputs: {[f'{i}:{label}' for i, label in enumerate(input_labels)]}")
+                
+                # Try to find metallic and specular roughness inputs by name
+                metallic_input = None
+                roughness_input = None
+                
+                for i, label in enumerate(input_labels):
+                    if 'metallic' in label.lower():
+                        metallic_input = i
+                    elif 'roughness' in label.lower() and 'specular' in label.lower():
+                        roughness_input = i
+                
+                if metallic_input is not None and roughness_input is not None:
+                    std_surface.setInput(roughness_input, sep_mr, 1)  # G channel to specular roughness
+                    std_surface.setInput(metallic_input, sep_mr, 2)    # B channel to metallic
+                    print(f"    ✓ Connected G→specular_roughness (input {roughness_input}), B→metallic (input {metallic_input})")
+                else:
+                    # Fallback to common indices if labels don't match
+                    std_surface.setInput(6, sep_mr, 1)  # G channel to specular roughness
+                    std_surface.setInput(3, sep_mr, 2)  # B channel to metallic
+                    print(f"    ✓ Connected metallic/roughness using fallback indices - G→roughness (6), B→metallic (3)")
+            except Exception as e:
+                print(f"    ✗ Failed to connect metallic/roughness: {e}")
         else:
             print(f"    ✗ Failed to set MR file parameter")
 
@@ -255,6 +275,63 @@ def create_solaris_mtlx_shader(material_library: hou.Node, prefix: str, assets_d
     subnet.layoutChildren()
     return subnet
 
+def create_plastic_material(material_library: hou.Node) -> hou.Node:
+    """
+    Create a plastic material with specific properties inside the Material Library.
+    """
+    print(f"\nCreating plastic material...")
+    
+    # Create a subnet for the plastic material
+    subnet = material_library.createNode("subnet", "plastic")
+
+    # --- Create nodes inside the subnet ---
+    # Output connector
+    out_surf = subnet.createNode("subnetconnector", "Surface_Out")
+    safe_set_parm(out_surf, "connectorkind", "output")
+    safe_set_parm(out_surf, "parmname", "surface")
+    safe_set_parm(out_surf, "parmlabel", "surface")
+    safe_set_parm(out_surf, "parmtype", "surface")
+
+    # Standard Surface for plastic
+    std_surface = subnet.createNode("mtlxstandard_surface", "plastic_surface")
+    std_surface.setGenericFlag(hou.nodeFlag.Material, True)
+
+    # Connect surface to the subnet's output
+    out_surf.setInput(0, std_surface)
+
+    # Set plastic material properties
+    try:
+        # Set specular roughness to 0.05 (very smooth/glossy)
+        if std_surface.parm("specular_roughness"):
+            safe_set_parm(std_surface, "specular_roughness", 0.05)
+            print(f"    ✓ Set specular roughness to 0.05")
+        
+        # Set transmission to 1.0 (fully transparent)
+        if std_surface.parm("transmission"):
+            safe_set_parm(std_surface, "transmission", 1.0)
+            print(f"    ✓ Set transmission to 1.0")
+        
+        # Try alternative parameter names if the above don't work
+        for roughness_parm in ["roughness", "specular_roughness", "inputs:specular_roughness"]:
+            if std_surface.parm(roughness_parm):
+                safe_set_parm(std_surface, roughness_parm, 0.05)
+                print(f"    ✓ Set {roughness_parm} to 0.05")
+                break
+        
+        for transmission_parm in ["transmission", "inputs:transmission", "transmission_weight"]:
+            if std_surface.parm(transmission_parm):
+                safe_set_parm(std_surface, transmission_parm, 1.0)
+                print(f"    ✓ Set {transmission_parm} to 1.0")
+                break
+                
+    except Exception as e:
+        print(f"    ✗ Warning: Could not set all plastic material properties: {e}")
+
+    # Layout nodes in the subnet
+    subnet.layoutChildren()
+    print(f"    ✓ Created plastic material")
+    return subnet
+
 def build_solaris_material_network(lop_net: hou.Node, prefixes: List[str], assets_dir: str, input_node: hou.Node = None) -> hou.Node:
     """
     Generates a Material Library, populates it with shaders inside subnets,
@@ -263,7 +340,7 @@ def build_solaris_material_network(lop_net: hou.Node, prefixes: List[str], asset
     if not lop_net or lop_net.type().name() != 'lopnet':
         raise ValueError(f"A valid LOP network ('lopnet') must be provided. Got type '{lop_net.type().name() if lop_net else 'None'}'.")
 
-    # 1. Add Dome Light first for easier debugging
+    # 1. Add Dome Light first for easier debugging (separate merge at top)
     try:
         dome_light = lop_net.createNode("domelight", "dome_light")
         if input_node:
@@ -271,55 +348,29 @@ def build_solaris_material_network(lop_net: hou.Node, prefixes: List[str], asset
         
         safe_set_parm(dome_light, "primpath", "/World/Lights/DomeLight")
         
-        # Try the encoded parameter names we found
-        texture_parm_names = [
-            'xn__inputstexturefile_r3ah',  # This looks like the texture file parameter
-            'inputs:texture:file',
-            'texture_file', 
-            'envmap'
-        ]
-        texture_set = False
+        # Set HDRI texture
+        safe_set_parm(dome_light, "xn__inputstexturefile_r3ah", "$HIP/hdri/studio_small_09_2k.exr")
         
-        for parm_name in texture_parm_names:
-            if dome_light.parm(parm_name):
-                try:
-                    safe_set_parm(dome_light, parm_name, "$HIP/hdri/studio_small_09_2k.exr")
-                    texture_set = True
-                    print(f"Set dome light texture using parameter: {parm_name}")
-                    break
-                except:
-                    continue
+        # Set intensity
+        safe_set_parm(dome_light, "xn__inputsintensity_i0a", 1.0)
         
-        # Try different intensity parameter names
-        intensity_parm_names = ['intensity', 'light_intensity', 'inputs:intensity']
-        intensity_set = False
+        # Enable render light geometry
+        safe_set_parm(dome_light, "xn__karmalightrenderlightgeo_4fbf", True)
         
-        for parm_name in intensity_parm_names:
-            if dome_light.parm(parm_name):
-                try:
-                    safe_set_parm(dome_light, parm_name, 1.0)
-                    intensity_set = True
-                    print(f"Set dome light intensity using parameter: {parm_name}")
-                    break
-                except:
-                    continue
+        print("Added dome light with HDRI texture and render light geometry enabled.")
         
-        if not texture_set:
-            print("Warning: Could not set dome light texture")
-        if not intensity_set:
-            print("Warning: Could not set dome light intensity")
-        
-        print("Added dome light.")
-        light_node = dome_light
+        # Create a separate merge for dome light (merges at the top)
+        dome_merge = lop_net.createNode("merge", "dome_merge")
+        dome_merge.setInput(0, dome_light)
 
     except Exception as e:
         print(f"Warning: Could not create dome light: {e}")
         print("Continuing without dome light...")
-        light_node = input_node if input_node else None
+        dome_merge = input_node if input_node else None
 
     # 2. Create a merge node to combine everything else
     merge_node = lop_net.createNode("merge", "scene_merge")
-    merge_node.setInput(0, light_node)  # Light node goes into first input
+    merge_node.setInput(0, dome_merge)  # Dome light merge goes into first input
     
     # 3. Create a Material Library LOP
     mat_lib = lop_net.createNode("materiallibrary", "generated_materials")
@@ -334,11 +385,14 @@ def build_solaris_material_network(lop_net: hou.Node, prefixes: List[str], asset
     material_counter = {}
     for prefix in prefixes:
         create_solaris_mtlx_shader(mat_lib, prefix, assets_dir, material_counter)
+    
+    # 5. Create plastic material
+    create_plastic_material(mat_lib)
         
     mat_lib.layoutChildren()
     print("\nSolaris Material Library created successfully.")
 
-    # 5. Create an Attribute Wrangle LOP for material assignment
+    # 6. Create an Attribute Wrangle LOP for material assignment
     wrangle_assign = lop_net.createNode("attribwrangle", "wrangle_material_assign")
     wrangle_assign.setInput(0, merge_node)  # Connect to merge instead
     
@@ -452,58 +506,95 @@ if(material_id != "" && !startswith(material_id, "polySurface")) {
     safe_set_parm(wrangle_assign, "snippet", vex_code)
     print("Created Attribute Wrangle for material assignment.")
 
-    # 7. Add Camera positioned 1 meter away from origin, facing 0,0,0
-    camera_lop = lop_net.createNode("camera", "render_camera")
-    camera_lop.setInput(0, wrangle_assign)
-    safe_set_parm(camera_lop, "primpath", "/World/Render/Camera")
-    safe_set_parm(camera_lop, "tx", 1.0)  # 1 meter away on X axis
-    safe_set_parm(camera_lop, "ty", 0.0)
-    safe_set_parm(camera_lop, "tz", 0.0)
-    safe_set_parm(camera_lop, "rx", 0.0)
-    safe_set_parm(camera_lop, "ry", -90.0)  # Rotate to face origin
-    safe_set_parm(camera_lop, "rz", 0.0)
-    print("Added render camera 1 meter from origin.")
+    # 7. Add separate plastic material assignment wrangle
+    plastic_wrangle = lop_net.createNode("attribwrangle", "wrangle_plastic_assign")
+    plastic_wrangle.setInput(0, wrangle_assign)
+    
+    # Set the primpattern to target plastic geometry specifically
+    safe_set_parm(plastic_wrangle, "primpattern", "/import_plastic %type:Mesh")
+    
+    # VEX code for plastic material assignment
+    plastic_vex_code = """// Assign plastic material to all plastic geometry
+string plastic_material_path = "/materials/plastic";
 
-    # 8. Add Karma Render Settings
+printf("Assigning plastic material to primitive: '%s'\\n", s@primpath);
+
+// Assign the plastic material
+usd_addrelationshiptarget(0, s@primpath, "material:binding", plastic_material_path);
+printf("SUCCESS: Assigned plastic material '%s' to primitive '%s'\\n", 
+       plastic_material_path, s@primpath);
+"""
+    
+    safe_set_parm(plastic_wrangle, "snippet", plastic_vex_code)
+    print("Created separate Attribute Wrangle for plastic material assignment.")
+
+    # 8. Add Camera positioned as requested
+    camera_lop = lop_net.createNode("camera", "render_camera")
+    camera_lop.setInput(0, plastic_wrangle)  # Connect to plastic wrangle instead
+    safe_set_parm(camera_lop, "primpath", "/World/Render/Camera")
+    safe_set_parm(camera_lop, "tx", -1.0)   # -1 on X axis
+    safe_set_parm(camera_lop, "ty", 0.3)    # 0.3 on Y axis  
+    safe_set_parm(camera_lop, "tz", 1.0)    # 1 on Z axis
+    safe_set_parm(camera_lop, "rx", -7.0)   # -7 degrees rotation X
+    safe_set_parm(camera_lop, "ry", -45.0)   # 45 degrees rotation Y
+    safe_set_parm(camera_lop, "rz", -1.0)   # -1 degrees rotation Z
+    print("Added render camera at (-1, 0.3, 1) with rotation (-7, 45, -1).")
+
+    # 9. Add Karma Render Settings - ensure we get the right node type
+    karma_settings = None
     try:
         karma_settings = lop_net.createNode("karmarenderproperties", "karma_render_settings")
         karma_settings.setInput(0, camera_lop)
         safe_set_parm(karma_settings, "camera", "/World/Render/Camera")
-        # Set some basic render settings
-        safe_set_parm(karma_settings, "res_x", 1920)
-        safe_set_parm(karma_settings, "res_y", 1080)
-        safe_set_parm(karma_settings, "pixel_samples", 64)
-        print("Added Karma render settings.")
-        final_node = karma_settings
+        
+        # Set output picture path
+        safe_set_parm(karma_settings, "picture", "$HIP/render/model_`@model`.exr")
+        
+        # Set resolution mode to manual and set 1024x1024 resolution
+        safe_set_parm(karma_settings, "res_mode", "manual")  # Manual resolution mode
+        
+        # Set resolution - using parmTuple for the resolution parameter
+        resolution_tuple = karma_settings.parmTuple("resolution")
+        resolution_tuple.set((1024, 1024))
+        
+        # Set samples per pixel
+        safe_set_parm(karma_settings, "samplesperpixel", 64)  # Samples per pixel
+        print("✓ Successfully created Karma render settings with 1024x1024 resolution.")
+        
     except Exception as e:
-        print(f"Warning: Could not create Karma render settings: {e}")
-        print("Trying alternative render settings node...")
+        print(f"ERROR: Could not create karmarenderproperties: {e}")
+        print("OUT_SCENE will connect to camera instead of render settings.")
+        karma_settings = None
+    
+    # 10. Determine which node should be the input to OUT_SCENE
+    if karma_settings is not None:
+        final_input_node = karma_settings
+        print("✓ Using karma_render_settings as input to OUT_SCENE.")
+    else:
+        final_input_node = camera_lop
+        print("⚠ Using camera as input to OUT_SCENE (karma render settings failed).")
+    
+    # 11. Create OUT_SCENE null as the absolute final node
+    try:
+        out_scene = lop_net.createNode("null", "OUT_SCENE")
+        out_scene.setInput(0, final_input_node)
+        print(f"✓ Successfully connected OUT_SCENE to {final_input_node.name()}")
         
-        # Try alternative node types
-        alternative_nodes = ["karmarendersettings", "rendersettings", "usdrendersettings", "outputdriver"]
-        final_node = camera_lop  # Default fallback
+        # Set display flag on OUT_SCENE to make it the active node
+        out_scene.setDisplayFlag(True)
+        print("✓ Set display flag on OUT_SCENE - this is now the final active node.")
         
-        for node_type in alternative_nodes:
-            try:
-                render_node = lop_net.createNode(node_type, f"{node_type}_settings")
-                render_node.setInput(0, camera_lop)
-                if render_node.parm("camera"):
-                    safe_set_parm(render_node, "camera", "/World/Render/Camera")
-                print(f"Successfully created {node_type} render settings.")
-                final_node = render_node
-                break
-            except Exception as alt_e:
-                print(f"Failed to create {node_type}: {alt_e}")
-                continue
-        
-        if final_node == camera_lop:
-            print("Using camera as final node - no render settings created.")
+    except Exception as e:
+        print(f"ERROR: Failed to create or connect OUT_SCENE: {e}")
+        print(f"Using {final_input_node.name()} as the final node instead.")
+        final_input_node.setDisplayFlag(True)
+        out_scene = final_input_node
 
     # Layout the parent network to keep things tidy
     lop_net.layoutChildren()
     
-    # Return the final node in the chain
-    return final_node
+    # Return OUT_SCENE as the final node in the chain
+    return out_scene
 
 # --- High-Level Orchestrator Function ---
 
@@ -526,21 +617,41 @@ def setup_solaris_materials_from_sops(sop_geo_path: str, prefixes: List[str], as
         print(f"Created new LOP network at: '{lop_net.path()}'")
     else:
         print(f"Found existing LOP network at '{lop_net.path()}'. Clearing its contents.")
-        clear_lop_network_children(lop_net)  # Fixed: Use the proper clearing function
+        clear_lop_network_children(lop_net)
 
-    # 2. Create a SOP Import LOP inside the LOP network.
-    geo_name = os.path.basename(sop_geo_path.strip("/"))
-    sop_import = lop_net.createNode("sopimport", f"import_{geo_name}")
-    safe_set_parm(sop_import, "soppath", sop_geo_path)
-    safe_set_parm(sop_import, "primpath", f"/{geo_name}")
-    print(f"Created SOP Import LOP for '{sop_geo_path}'. Primitives will be under '/{geo_name}'.")
+    # 2. Create three separate SOP Import LOPs inside the LOP network
+    
+    # Model import (original geometry)
+    sop_import_model = lop_net.createNode("sopimport", "import_model")
+    safe_set_parm(sop_import_model, "soppath", f"{sop_geo_path}/OUT_MODEL")
+    safe_set_parm(sop_import_model, "primpath", "/model")
+    print(f"Created SOP Import LOP for model geometry at '{sop_geo_path}/OUT_MODEL'.")
+    
+    # Plastic import
+    sop_import_plastic = lop_net.createNode("sopimport", "import_plastic")
+    safe_set_parm(sop_import_plastic, "soppath", f"{sop_geo_path}/OUT_PLASTIC")
+    safe_set_parm(sop_import_plastic, "primpath", "/plastic")
+    print(f"Created SOP Import LOP for plastic geometry at '{sop_geo_path}/OUT_PLASTIC'.")
+    
+    # Styrofoam import
+    sop_import_styrofoam = lop_net.createNode("sopimport", "import_styrofoam")
+    safe_set_parm(sop_import_styrofoam, "soppath", f"{sop_geo_path}/OUT_STYROFOAM")
+    safe_set_parm(sop_import_styrofoam, "primpath", "/styrofoam")
+    print(f"Created SOP Import LOP for styrofoam geometry at '{sop_geo_path}/OUT_STYROFOAM'.")
+    
+    # 3. Merge all geometry imports
+    geometry_merge = lop_net.createNode("merge", "geometry_merge")
+    geometry_merge.setInput(0, sop_import_model)
+    geometry_merge.setInput(1, sop_import_plastic)
+    geometry_merge.setInput(2, sop_import_styrofoam)
+    print(f"Created geometry merge node combining all three imports.")
 
-    # 3. Call the material network builder
+    # 4. Call the material network builder
     final_node = build_solaris_material_network(
         lop_net=lop_net,
         prefixes=prefixes,
         assets_dir=assets_dir,
-        input_node=sop_import
+        input_node=geometry_merge
     )
     
     # 4. Set the display flag on the end of our new chain.
@@ -567,7 +678,6 @@ if __name__ == "__main__":
         if not assets_geo:
             assets_geo = obj_net.createNode("geo", os.path.basename(SOP_GEO_PATH.strip('/')))
         
-        # Fixed: Use the proper clearing function for example code too
         clear_lop_network_children(assets_geo)
 
         last_node = None

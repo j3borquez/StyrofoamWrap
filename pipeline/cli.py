@@ -42,6 +42,10 @@ def main():
         "--clean-modified", action="store_true",
         help="Remove existing modified USD files before processing."
     )
+    parser.add_argument(
+        "--use-deadline", action="store_true",
+        help="Use Deadline for TOPs scheduling instead of local scheduler."
+    )
     args = parser.parse_args()
 
     # --- Path Resolution ---
@@ -179,35 +183,118 @@ def main():
             print(f"Error saving HIP file: {e}")
             return
 
-        if DeadlineSubmitter:
-            print("Submitting jobs to Deadline...")
+        # 8. Execute TOPs Workflow
+        # Get the actual saved path for job submission
+        actual_hip_path = hou.hipFile.path()
+        hda_node_path = "/obj/assets/wrapped_assets"
+        
+        if args.use_deadline and DeadlineSubmitter:
+            print("\nSubmitting TOPs workflow to Deadline...")
             submitter = DeadlineSubmitter(settings.deadline_command)
             
-            # Use the actual saved path for job submission
-            actual_hip_path = hou.hipFile.path()
+            # Submit TOPs job with Deadline scheduler - this will handle loading the file properly
+            tops_job_id = submitter.submit_tops_with_scheduler(
+                actual_hip_path,
+                hda_node_path,
+                scheduler_type="deadline",
+                name=f"TOPs_Styrofoam_{Path(actual_hip_path).stem}"
+            )
+            print(f"  - TOPs workflow submitted to Deadline (ID: {tops_job_id})")
             
-            # Submit simulation job
-            sim_id = submitter.submit_simulation(
-                actual_hip_path,
-                settings.frame_range,
-                settings.sim_output_driver,
-            )
-            print(f"  - Simulation job submitted (ID: {sim_id})")
-
-            # Submit render job, dependent on the simulation
-            rend_id = submitter.submit_render(
-                actual_hip_path,
-                settings.frame_range,
-                settings.render_output_driver,
-                depends_on=sim_id,
-            )
-            print(f"  - Render job submitted (ID: {rend_id})")
         else:
-            print("Job submission skipped (DeadlineSubmitter not configured).")
+            print("\nPreparing to execute TOPs workflow locally...")
+            print("  - TOPs workflow will be executed after file is properly loaded")
+            
+            # For local execution, we need to save the scene, reload it fresh, then execute TOPs
+            # This ensures the HDA and all its parameters are properly initialized
+            
+            # Save again to make sure everything is committed
+            hou.hipFile.save()
+            
+            # Wait a moment for the file system
+            import time
+            time.sleep(1)
+            
+            # Reload the file to ensure everything is properly initialized
+            print(f"  - Reloading HIP file to ensure proper initialization...")
+            hou.hipFile.load(actual_hip_path)
+            
+            # Wait for the scene to fully load
+            time.sleep(2)
+            
+            # Now try to get the HDA node after reload
+            hda_node = hou.node(hda_node_path)
+            
+            if hda_node is not None:
+                print("  - HDA node found after reload, executing TOPs workflow...")
+                
+                # Set scheduler to local
+                scheduler_parm = hda_node.parm("topscheduler")
+                if scheduler_parm:
+                    scheduler_parm.set("localscheduler")
+                    print("    - Set scheduler to localscheduler")
+                else:
+                    print("    - Warning: topscheduler parameter not found")
+                
+                # Wait a moment for parameter to update
+                time.sleep(0.5)
+                
+                # Execute TOPs workflow locally
+                print("    - Dirtying TOPs network...")
+                dirty_parm = hda_node.parm("dirtybutton")
+                if dirty_parm:
+                    dirty_parm.pressButton()
+                    print("    - TOPs network dirtied")
+                else:
+                    print("    - Warning: dirtybutton parameter not found")
+                
+                # Wait a moment between dirty and cook
+                time.sleep(1)
+                
+                print("    - Cooking TOPs network...")
+                cook_parm = hda_node.parm("cookbutton")
+                if cook_parm:
+                    cook_parm.pressButton()
+                    print("    - TOPs workflow execution initiated")
+                    print("    - TOPs workflow is now running in the current session")
+                    
+                    # Give some time for the TOPs to start processing
+                    print("    - Waiting for TOPs to initialize...")
+                    time.sleep(3)
+                    print("    - Check Houdini's TOPs network for progress")
+                else:
+                    print("    - Warning: cookbutton parameter not found")
+                    
+            else:
+                print(f"  - Warning: HDA node still not found at {hda_node_path} after reload")
+                print("  - Skipping TOPs workflow execution")
+                
+                # Fallback to original simulation/render submission if available
+                if DeadlineSubmitter and hasattr(settings, 'sim_output_driver'):
+                    print("  - Falling back to traditional simulation/render job submission...")
+                    submitter = DeadlineSubmitter(settings.deadline_command)
+                    
+                    # Submit simulation job
+                    sim_id = submitter.submit_simulation(
+                        actual_hip_path,
+                        settings.frame_range,
+                        settings.sim_output_driver,
+                    )
+                    print(f"    - Simulation job submitted (ID: {sim_id})")
+
+                    # Submit render job, dependent on the simulation
+                    rend_id = submitter.submit_render(
+                        actual_hip_path,
+                        settings.frame_range,
+                        settings.render_output_driver,
+                        depends_on=sim_id,
+                    )
+                    print(f"    - Render job submitted (ID: {rend_id})")
+                
     else:
         print("\n[Dry Run] Skipping HIP file save and job submission.")
 
-    # 8. Launch Houdini GUI if Requested
+    # 9. Launch Houdini GUI if Requested
     if args.launch:
         hfs = os.getenv("HFS")
         if not hfs:

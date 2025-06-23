@@ -422,38 +422,20 @@ class HoudiniHipManager(HipManager):
         out_null.setInput(0, merge)
         out_null.moveToGoodPosition()
 
-        # 7) Rotate X -90 (Z-up → Y-up)
+
+        # 11) Primitive Wrangle (NEW: added before z_to_y)
+        prim_wrangle = container.createNode("attribwrangle", "primitive_wrangle")
+        prim_wrangle.setInput(0, out_null)
+        prim_wrangle.parm("class").set(1)  # Set to primitive mode
+        prim_wrangle.moveToGoodPosition()
+
+        # 12) Rotate X -90 (Z-up → Y-up) - Now connects to primitive wrangle
         xform = container.createNode("xform", "z_to_y")
-        xform.setInput(0, out_null)
+        xform.setInput(0, prim_wrangle)
         xform.parm("rx").set(-90)
         xform.moveToGoodPosition()
 
-        # 8) Connectivity
-        conn = container.createNode("connectivity", "connectivity_prim_wedge")
-        conn.setInput(0, xform)
-        conn.parm("connecttype").set(1)
-        conn.parm("attribname").set("wedge")
-        conn.moveToGoodPosition()
-
-        # 9) Blast
-        blast = container.createNode("blast", "blast_wedge")
-        blast.setInput(0, conn)
-        blast.parm("group").set('!@wedge==@wedgenum')
-        blast.moveToGoodPosition()
-
-        # 10) Unpack USD
-        unpack = container.createNode("unpackusd", "unpack_usd")
-        unpack.setInput(0, blast)
-        unpack.parm("output").set("polygons")
-        unpack.moveToGoodPosition()
-
-        # 11) Normal node (compute face/vertex normals)
-        normal = container.createNode("normal", "compute_normals")
-        normal.setInput(0, unpack)
-        normal.moveToGoodPosition()
-
-        # 12) HDA (optional)
-        last_node = normal
+        # 13) HDA (optional) - Now connects to z_to_y
         if hda_path:
             if not os.path.isfile(hda_path):
                 raise FileNotFoundError(f"HDA file not found: {hda_path}")
@@ -463,15 +445,32 @@ class HoudiniHipManager(HipManager):
                 raise RuntimeError(f"No HDA definitions found in {hda_path}")
             hda_type = defs[0].nodeTypeName()
             hda_node = container.createNode(hda_type, "wrapped_assets")
-            hda_node.setInput(0, normal)
+            hda_node.setInput(0, xform)  # Connect to z_to_y instead of out_model
             hda_node.moveToGoodPosition()
-            last_node = hda_node
+            
+            # 14) Create output nulls for HDA outputs
+            out_styrofoam = container.createNode("null", "OUT_STYROFOAM")
+            out_styrofoam.setInput(0, hda_node, 0)  # Connect to first output
+            out_styrofoam.moveToGoodPosition()
+            
+            out_plastic = container.createNode("null", "OUT_PLASTIC") 
+            out_plastic.setInput(0, hda_node, 1)  # Connect to second output
+            out_plastic.moveToGoodPosition()
+            
+            # NEW: Third output - OUT_MODEL connects to third HDA output
+            out_model = container.createNode("null", "OUT_MODEL")
+            out_model.setInput(0, hda_node, 2)  # Connect to third output
+            out_model.moveToGoodPosition()
+            
+            # Set display flag on one of the outputs
+            out_styrofoam.setDisplayFlag(True)
+            
+        else:
+            # If no HDA, create OUT_MODEL and connect it to z_to_y
+            out_model = container.createNode("null", "OUT_MODEL")
+            out_model.setInput(0, xform)  # Connect to z_to_y
+            out_model.moveToGoodPosition()
+            out_model.setDisplayFlag(True)
 
-        # 13) Final null & display
-        final_null = container.createNode("null", "FINAL_OUT")
-        final_null.setInput(0, last_node)
-        final_null.setDisplayFlag(True)
-        final_null.moveToGoodPosition()
-
-        # 14) Layout
+        # 15) Layout
         container.layoutChildren()
