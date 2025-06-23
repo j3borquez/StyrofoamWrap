@@ -95,18 +95,30 @@ class DeadlineSubmitter:
             ji.append(f"DependsOnJobID={depends_on}")
         
         # Plugin info - we'll use a Python script to execute the TOPs workflow
-        # This script will dirty and cook the TOPs network
+        # This script will load the file, wait for initialization, then execute TOPs
         script_commands = [
             f"import hou",
+            f"import time",
+            f"print('Loading HIP file: {hip_path}')",
             f"hou.hipFile.load('{hip_path}')",
+            f"print('Waiting for scene to initialize...')",
+            f"time.sleep(3)",
             f"hda_node = hou.node('{hda_node_path}')",
             f"if hda_node is None:",
             f"    raise RuntimeError('HDA node not found: {hda_node_path}')",
+            f"print('HDA node found, checking parameters...')",
+            f"if not hda_node.parm('dirtybutton'):",
+            f"    raise RuntimeError('dirtybutton parameter not found on HDA')",
+            f"if not hda_node.parm('cookbutton'):",
+            f"    raise RuntimeError('cookbutton parameter not found on HDA')",
             f"print('Dirtying TOPs network...')",
             f"hda_node.parm('dirtybutton').pressButton()",
+            f"time.sleep(2)",
             f"print('Cooking TOPs network...')",
             f"hda_node.parm('cookbutton').pressButton()",
-            f"print('TOPs workflow execution completed')"
+            f"print('TOPs workflow execution initiated')",
+            f"time.sleep(1)",
+            f"print('TOPs workflow is now running')"
         ]
         
         # Join script commands with semicolons for single-line execution
@@ -147,19 +159,35 @@ class DeadlineSubmitter:
         # More sophisticated script that can configure the scheduler
         script_commands = [
             f"import hou",
+            f"import time",
+            f"print('Loading HIP file: {hip_path}')",
             f"hou.hipFile.load('{hip_path}')",
+            f"print('Waiting for scene to initialize...')",
+            f"time.sleep(3)",
             f"hda_node = hou.node('{hda_node_path}')",
             f"if hda_node is None:",
             f"    raise RuntimeError('HDA node not found: {hda_node_path}')",
+            f"print('HDA node found, configuring scheduler...')",
             f"# Set the scheduler type",
             f"if hda_node.parm('topscheduler'):",
             f"    hda_node.parm('topscheduler').set('{scheduler_type}')",
-            f"print('Set scheduler to: {scheduler_type}')",
+            f"    print('Set scheduler to: {scheduler_type}')",
+            f"    time.sleep(1)",
+            f"else:",
+            f"    print('Warning: topscheduler parameter not found')",
+            f"# Validate required parameters exist",
+            f"if not hda_node.parm('dirtybutton'):",
+            f"    raise RuntimeError('dirtybutton parameter not found on HDA')",
+            f"if not hda_node.parm('cookbutton'):",
+            f"    raise RuntimeError('cookbutton parameter not found on HDA')",
             f"print('Dirtying TOPs network...')",
             f"hda_node.parm('dirtybutton').pressButton()",
+            f"time.sleep(2)",
             f"print('Cooking TOPs network...')",
             f"hda_node.parm('cookbutton').pressButton()",
-            f"print('TOPs workflow execution completed with {scheduler_type} scheduler')"
+            f"print('TOPs workflow execution initiated with {scheduler_type} scheduler')",
+            f"time.sleep(1)",
+            f"print('TOPs workflow is now running')"
         ]
         
         python_script = "; ".join(script_commands)

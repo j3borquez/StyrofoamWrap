@@ -427,6 +427,8 @@ class HoudiniHipManager(HipManager):
         prim_wrangle = container.createNode("attribwrangle", "primitive_wrangle")
         prim_wrangle.setInput(0, out_null)
         prim_wrangle.parm("class").set(1)  # Set to primitive mode
+        prim_wrangle.parm("snippet").set("i@prim_amount = @primnum + 1;")
+
         prim_wrangle.moveToGoodPosition()
 
         # 12) Rotate X -90 (Z-up → Y-up) - Now connects to primitive wrangle
