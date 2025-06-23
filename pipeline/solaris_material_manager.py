@@ -511,7 +511,7 @@ if(material_id != "" && !startswith(material_id, "polySurface")) {
     plastic_wrangle.setInput(0, wrangle_assign)
     
     # Set the primpattern to target plastic geometry specifically
-    safe_set_parm(plastic_wrangle, "primpattern", "/import_plastic %type:Mesh")
+    safe_set_parm(plastic_wrangle, "primpattern", "/import_plastic")
     
     # VEX code for plastic material assignment
     plastic_vex_code = """// Assign plastic material to all plastic geometry
