@@ -220,11 +220,10 @@ StyrofoamWrap/
 │   ├── solaris_material_manager.py     # Material creation
 │   ├── asset_locator.py                # Asset discovery
 │   ├── submit_config_generator.py      # Startup script generator
-│   └── job_submitter.py                # Render farm submission
+│   └──
 ├── tests/                              # Unit tests
 ├── assets/                             # USD files, textures, and HDAs
 ├── env_setup.py                        # Environment setup script
-├── submit_config.py                    # Auto-generated startup script
 └── README.md                           # This file
 ```
 
