@@ -88,12 +88,14 @@ E:\Project_Work\Amazon\StyrofoamWrap\
 ```
 
 ### 2. Configure Settings
-Edit `pipeline/config.py` to match your project paths:
-```python
-# Example configuration
-assets_dir = "E:/Project_Work/Amazon/StyrofoamWrap/assets"
-hip_path = "E:/Project_Work/Amazon/StyrofoamWrap/styrofoam_project.hiplc"
-hda_path = "E:/Project_Work/Amazon/StyrofoamWrap/assets/styrofoam_wrapper.hda"
+Edit the `.env` file to match your project paths:
+```bash
+# Example .env configuration
+STYROFOAM_ASSETS_DIR=E:/Project_Work/Amazon/StyrofoamWrap/assets
+STYROFOAM_HIP_PATH=E:/Project_Work/Amazon/StyrofoamWrap/styrofoam_project.hiplc
+STYROFOAM_HDA_PATH=E:/Project_Work/Amazon/StyrofoamWrap/assets/styrofoam_wrapper.hda
+STYROFOAM_UP_AXIS=y
+STYROFOAM_DEADLINE_COMMAND=C:/Program Files/Thinkbox/Deadline10/bin/deadlinecommand.exe
 ```
 
 ## Pipeline Workflow
@@ -173,7 +175,7 @@ Examples:
   ```
 
 **"No USD files found"**
-- Check assets directory path in `pipeline/config.py`
+- Check your assets directory path in the `.env` file
 - Ensure USD files are in correct location
 
 **"Save and Continue dialog appears"**
