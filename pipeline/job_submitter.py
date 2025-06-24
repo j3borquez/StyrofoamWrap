@@ -102,23 +102,25 @@ class DeadlineSubmitter:
             f"print('Loading HIP file: {hip_path}')",
             f"hou.hipFile.load('{hip_path}')",
             f"print('Waiting for scene to initialize...')",
-            f"time.sleep(3)",
+            f"time.sleep(5)",  # Increased wait time for initialization
             f"hda_node = hou.node('{hda_node_path}')",
             f"if hda_node is None:",
             f"    raise RuntimeError('HDA node not found: {hda_node_path}')",
-            f"print('HDA node found, checking parameters...')",
+            f"print(f'HDA node found: {{hda_node.name()}} ({{hda_node.type().name()}})')",
+            f"# Validate required parameters exist",
             f"if not hda_node.parm('dirtybutton'):",
             f"    raise RuntimeError('dirtybutton parameter not found on HDA')",
             f"if not hda_node.parm('cookbutton'):",
             f"    raise RuntimeError('cookbutton parameter not found on HDA')",
+            f"print('Found required TOPs control parameters')",
             f"print('Dirtying TOPs network...')",
             f"hda_node.parm('dirtybutton').pressButton()",
-            f"time.sleep(2)",
+            f"time.sleep(3)",  # Wait for dirty operation to complete
             f"print('Cooking TOPs network...')",
             f"hda_node.parm('cookbutton').pressButton()",
-            f"print('TOPs workflow execution initiated')",
-            f"time.sleep(1)",
-            f"print('TOPs workflow is now running')"
+            f"print('TOPs workflow execution initiated successfully')",
+            f"time.sleep(2)",
+            f"print('TOPs workflow is now running - monitor progress in Houdini')"
         ]
         
         # Join script commands with semicolons for single-line execution
@@ -156,6 +158,15 @@ class DeadlineSubmitter:
         if depends_on:
             ji.append(f"DependsOnJobID={depends_on}")
         
+        # Build the scheduler path based on the type
+        if scheduler_type == "deadline":
+            scheduler_path = "/tasks/topnet1/deadlinescheduler"
+        elif scheduler_type == "localscheduler":
+            scheduler_path = "/tasks/topnet1/localscheduler"
+        else:
+            # For custom scheduler types, assume they follow the pattern
+            scheduler_path = f"/tasks/topnet1/{scheduler_type}"
+        
         # More sophisticated script that can configure the scheduler
         script_commands = [
             f"import hou",
@@ -163,31 +174,35 @@ class DeadlineSubmitter:
             f"print('Loading HIP file: {hip_path}')",
             f"hou.hipFile.load('{hip_path}')",
             f"print('Waiting for scene to initialize...')",
-            f"time.sleep(3)",
+            f"time.sleep(5)",  # Increased wait time
             f"hda_node = hou.node('{hda_node_path}')",
             f"if hda_node is None:",
             f"    raise RuntimeError('HDA node not found: {hda_node_path}')",
-            f"print('HDA node found, configuring scheduler...')",
-            f"# Set the scheduler type",
+            f"print(f'HDA node found: {{hda_node.name()}} ({{hda_node.type().name()}})')",
+            f"# Configure the scheduler if topscheduler parameter exists",
             f"if hda_node.parm('topscheduler'):",
-            f"    hda_node.parm('topscheduler').set('{scheduler_type}')",
-            f"    print('Set scheduler to: {scheduler_type}')",
-            f"    time.sleep(1)",
+            f"    current_scheduler = hda_node.parm('topscheduler').eval()",
+            f"    print(f'Current scheduler: {{current_scheduler}}')",
+            f"    hda_node.parm('topscheduler').set('{scheduler_path}')",
+            f"    new_scheduler = hda_node.parm('topscheduler').eval()",
+            f"    print(f'Set scheduler to: {{new_scheduler}}')",
+            f"    time.sleep(2)",  # Allow parameter change to take effect
             f"else:",
-            f"    print('Warning: topscheduler parameter not found')",
+            f"    print('Warning: topscheduler parameter not found, using default scheduler')",
             f"# Validate required parameters exist",
             f"if not hda_node.parm('dirtybutton'):",
             f"    raise RuntimeError('dirtybutton parameter not found on HDA')",
             f"if not hda_node.parm('cookbutton'):",
             f"    raise RuntimeError('cookbutton parameter not found on HDA')",
+            f"print('Found required TOPs control parameters')",
             f"print('Dirtying TOPs network...')",
             f"hda_node.parm('dirtybutton').pressButton()",
-            f"time.sleep(2)",
+            f"time.sleep(3)",  # Wait for dirty operation
             f"print('Cooking TOPs network...')",
             f"hda_node.parm('cookbutton').pressButton()",
-            f"print('TOPs workflow execution initiated with {scheduler_type} scheduler')",
-            f"time.sleep(1)",
-            f"print('TOPs workflow is now running')"
+            f"print(f'TOPs workflow execution initiated with {{scheduler_type}} scheduler')",
+            f"time.sleep(2)",
+            f"print('TOPs workflow is now running - check scheduler for task distribution')"
         ]
         
         python_script = "; ".join(script_commands)
@@ -195,6 +210,77 @@ class DeadlineSubmitter:
         pi = [
             f"HoudiniHipFile={hip_path}",
             f"HoudiniIgnoreInputs=True", 
+            f"HoudiniPythonScript={python_script}",
+        ]
+        
+        return self._submit(ji, pi)
+    
+    def submit_tops_local_execution(self, hip_path: str, hda_node_path: str, name: Optional[str] = None) -> str:
+        """
+        Submit a job that executes TOPs workflow locally (non-distributed).
+        This is useful for testing or when you want all work done on a single machine.
+        
+        Args:
+            hip_path: Path to the Houdini .hip file
+            hda_node_path: Path to the HDA node containing the TOPs network
+            name: Optional custom job name
+        """
+        return self.submit_tops_with_scheduler(
+            hip_path=hip_path,
+            hda_node_path=hda_node_path,
+            scheduler_type="localscheduler",
+            name=name or f"TOPs_Local_{os.path.basename(hip_path)}"
+        )
+    
+    def get_tops_status(self, hip_path: str, hda_node_path: str, name: Optional[str] = None) -> str:
+        """
+        Submit a job to check the status of a TOPs network without cooking it.
+        
+        Args:
+            hip_path: Path to the Houdini .hip file
+            hda_node_path: Path to the HDA node containing the TOPs network
+            name: Optional custom job name
+        """
+        job_name = name or f"TOPs_Status_{os.path.basename(hip_path)}"
+        
+        ji = [
+            "Plugin=Houdini",
+            f"Name={job_name}",
+            "Frames=1",
+            "Comment=TOPs workflow status check",
+        ]
+        
+        # Script to check TOPs status
+        script_commands = [
+            f"import hou",
+            f"import time",
+            f"print('Loading HIP file: {hip_path}')",
+            f"hou.hipFile.load('{hip_path}')",
+            f"time.sleep(3)",
+            f"hda_node = hou.node('{hda_node_path}')",
+            f"if hda_node is None:",
+            f"    raise RuntimeError('HDA node not found: {hda_node_path}')",
+            f"print(f'HDA node found: {{hda_node.name()}}')",
+            f"# Check if TOPs network exists and get status",
+            f"if hda_node.parm('topscheduler'):",
+            f"    scheduler = hda_node.parm('topscheduler').eval()",
+            f"    print(f'Current TOPs scheduler: {{scheduler}}')",
+            f"else:",
+            f"    print('No topscheduler parameter found')",
+            f"# Check other relevant parameters",
+            f"for parm_name in ['cookbutton', 'dirtybutton', 'cancelbutton']:",
+            f"    if hda_node.parm(parm_name):",
+            f"        print(f'Parameter {{parm_name}} is available')",
+            f"    else:",
+            f"        print(f'Parameter {{parm_name}} is NOT available')",
+            f"print('TOPs status check completed')"
+        ]
+        
+        python_script = "; ".join(script_commands)
+        
+        pi = [
+            f"HoudiniHipFile={hip_path}",
+            f"HoudiniIgnoreInputs=True",
             f"HoudiniPythonScript={python_script}",
         ]
         
