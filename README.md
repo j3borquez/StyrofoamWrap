@@ -1,6 +1,6 @@
 # StyrofoamWrap
 
-![EXR Grid Output](gridview/exr_grid_output.png)
+![EXR Grid Output](gridview/grid.png)
 
 A procedural pipeline to import USD assets into Houdini, wrap them in styrofoam bases using TOPs workflows, and submit simulation/render jobs to Deadline.
 
