@@ -6,9 +6,9 @@ def load_and_execute_tops():
     """Load HIP file and execute TOPs workflow."""
     time.sleep(3)  # Wait for GUI to be ready
     
-    hip_file_path = r"E:/Project_Work/Amazon/StyrofoamWrap/styrofoam_w_v01_002.hiplc"
+    hip_file_path = r"E:/Project_Work/Amazon/StyrofoamWrap/styrofoam_w_v01_007.hiplc"
     hda_node_path = "/obj/assets/wrapped_assets"
-    scheduler_type = "localscheduler"
+    scheduler_type = "deadline"
     
     try:
         print(f"Loading HIP file: {hip_file_path}")
